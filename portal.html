@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>MH Meats — Order</title>
+<link rel="stylesheet" href="style.css?v=1.0.0">
+<style>
+  body { padding-bottom: 96px; }
+  .top { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 16px; position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 14px 14px 20px; }
+  .dates { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+  .date-chip { flex-shrink: 0; padding: 8px 12px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); cursor: pointer; text-align: center; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 14px; }
+  .date-chip small { display: block; font-family: 'DM Mono', monospace; font-weight: 400; font-size: 10px; }
+  .date-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+  .sec-title { font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .5px; margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 5px; }
+  .row.has-qty { border-color: var(--accent); background: rgba(200,168,75,.06); }
+  .plu { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); width: 38px; flex-shrink: 0; }
+  .pname { flex: 1; font-size: 13px; font-weight: 500; }
+  .unit { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted); width: 34px; text-align: center; }
+  .qty { width: 64px; background: var(--surface2); border: 1px solid var(--border2); border-radius: 5px; color: var(--accent); font-family: 'DM Mono', monospace; font-size: 16px; text-align: center; padding: 6px 4px; }
+  .qty:focus { outline: none; border-color: var(--accent); }
+  .footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--surface); border-top: 1px solid var(--border2); padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 10px; z-index: 60; }
+  .footer .count { flex: 1; font-size: 13px; }
+  .submit { padding: 12px 22px; font-size: 16px; }
+  .search { width: 100%; margin: 10px 0 2px; }
+  .hist { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+  .hist-h { padding: 9px 12px; background: var(--surface2); display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .confirm { text-align: center; padding: 30px 10px; }
+  .confirm .big { font-size: 54px; }
+  #voiceStatus { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); background: #000; border: 1px solid var(--accent); color: var(--accent); padding: 8px 16px; border-radius: 20px; z-index: 80; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="logo" style="font-size:19px">MH<span> MEATS</span></div>
+  <span class="badge" id="custBadge">…</span>
+  <div style="margin-left:auto;display:flex;gap:6px">
+    <button class="btn btn-ghost hidden" id="lastBtn" onclick="P.loadLast()">📋 Last order</button>
+    <button class="btn btn-ghost hidden" id="voiceBtn" onclick="P.toggleVoice()" title="Say e.g. “six chicken fillets”">🎤</button>
+  </div>
+</div>
+<div id="voiceStatus" class="hidden"></div>
+
+<div class="wrap" id="main"><div class="empty-state"><div class="empty-icon">⏳</div><div>Loading your order form…</div></div></div>
+
+<div class="footer hidden" id="footer">
+  <div class="count" id="footCount"></div>
+  <button class="btn btn-primary submit" id="submitBtn" onclick="P.submit()">Send order →</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="config.js?v=1.0.0"></script>
+<script src="api.js?v=1.0.0"></script>
+<script>
+(function () {
+  'use strict';
+  const API = window.MHApi;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const pad = n => String(n).padStart(2, '0');
+  const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d, 12); };
+  const nice = s => parse(s).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  const fmtQty = q => (Math.round(Number(q) * 100) / 100).toString();
+  const ssGet = k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } };
+  const ssSet = (k, v) => { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) {} };
+
+  const params = new URLSearchParams(location.search);
+  const P = {
+    cust: params.get('c') || params.get('customer') || '',
+    token: params.get('k') || '',
+    customer: null, products: [], today: '',
+    date: '', qty: {}, saved: {}, dirty: false, lastSubmitted: '', history: [], sending: false,
+  };
+
+  function toast(msg, bad) {
+    const t = $('toast'); t.textContent = (bad ? '✗ ' : '✓ ') + msg;
+    t.className = 'toast show' + (bad ? ' err' : ''); clearTimeout(t._h);
+    t._h = setTimeout(() => { t.className = 'toast'; }, bad ? 6000 : 2500);
+  }
+  function fatal(title, msg) {
+    $('main').innerHTML = `<div class="empty-state"><div class="empty-icon">⚠</div><h2 class="cond">${esc(title)}</h2><div>${esc(msg)}</div><div class="muted" style="font-size:12px">If this keeps happening, please call MH Meats.</div></div>`;
+    $('footer').classList.add('hidden');
+  }
+
+  // Delivery days customers can choose: weekdays from today, for the next 2 weeks
+  function dateOptions() {
+    const out = []; const d = parse(P.today || ymd(new Date()));
+    for (let i = 0; out.length < 10 && i < 21; i++) { const dow = d.getDay(); if (dow >= 1 && dow <= 5) out.push(ymd(d)); d.setDate(d.getDate() + 1); }
+    return out;
+  }
+
+  async function init() {
+    if (!API.configured()) return fatal('Ordering is not available yet', 'This order form is not connected.');
+    if (!P.cust || !P.token) return fatal('Link not recognised', 'This link is incomplete. Please ask MH Meats to resend your order link.');
+    try {
+      const r = await API.call('portalInit', { customer: P.cust, token: P.token });
+      P.customer = r.customer; P.products = r.products; P.today = r.today;
+    } catch (e) {
+      return fatal(e.auth ? 'Link not recognised' : 'Could not load the order form', e.message);
+    }
+    $('custBadge').textContent = P.customer.name;
+    document.title = 'MH Meats — ' + P.customer.name + ' order';
+    $('voiceBtn').classList.toggle('hidden', !(window.SpeechRecognition || window.webkitSpeechRecognition));
+    P.date = dateOptions()[0];
+    render();
+    loadDate(P.date);
+    loadHistory();
+  }
+
+  function render() {
+    const opts = dateOptions();
+    const sections = P.products.some(p => p.cat.indexOf('chef-') === 0)
+      ? [['chef-beef', '🥩 Beef Products'], ['chef-chicken', '🐔 Chicken Products'], ['chef-lamb', '🐑 Lamb Products']]
+      : [['beef', '🥩 Beef'], ['poultry', '🐔 Poultry'], ['flavoured', '🌶 Flavoured Products']];
+    let html = `<div class="card"><div class="card-body">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">DELIVERY DAY</div>
+      <div class="dates">${opts.map(d => `<button class="date-chip${d === P.date ? ' active' : ''}" data-date="${d}">${parse(d).toLocaleDateString('en-GB', { weekday: 'short' }).toUpperCase()}<small>${parse(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</small></button>`).join('')}</div>
+      <div id="dateInfo" style="font-size:12px;margin-top:8px" class="muted"></div></div></div>
+      <input class="field search" id="search" placeholder="🔍 Find a product…" autocomplete="off">`;
+    sections.forEach(([cat, title]) => {
+      const ps = P.products.filter(p => p.cat === cat);
+      if (!ps.length) return;
+      html += `<div class="sec-title" data-sec="${cat}">${title}</div>` + ps.map(p => `<div class="row" data-row="${esc(p.id)}" data-name="${esc(p.name.toLowerCase())}">
+        <span class="plu">${esc(p.plu || '—')}</span><span class="pname">${esc(p.name)}</span>${cat === 'beef' && p.unit ? `<span class="unit">${esc(p.unit)}</span>` : ''}
+        <input type="number" class="qty" data-pid="${esc(p.id)}" min="0" step="any" inputmode="decimal" placeholder="0"></div>`).join('');
+    });
+    html += `<div class="sec-title">📝 Note for MH Meats (optional)</div>
+      <textarea class="field" id="orderNote" rows="2" maxlength="300" style="width:100%" placeholder="e.g. deliver before 10am"></textarea>
+      <div class="sec-title" style="margin-top:22px">📋 Your recent orders</div><div id="history" class="muted" style="font-size:12px">Loading…</div>`;
+    $('main').innerHTML = html;
+    $('footer').classList.remove('hidden');
+    $('main').querySelectorAll('.date-chip').forEach(b => { b.onclick = () => changeDate(b.dataset.date); });
+    $('main').querySelectorAll('.qty').forEach(inp => {
+      inp.oninput = () => setQty(inp.dataset.pid, inp.value);
+      inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const all = [...document.querySelectorAll('.row:not(.hidden) .qty')]; const i = all.indexOf(inp); if (all[i + 1]) all[i + 1].focus(); } };
+    });
+    $('search').oninput = () => {
+      const q = $('search').value.trim().toLowerCase();
+      document.querySelectorAll('[data-row]').forEach(r => r.classList.toggle('hidden', !!q && r.dataset.name.indexOf(q) < 0));
+    };
+    $('orderNote').oninput = () => { P.dirty = true; };
+    paintQty(); footer();
+  }
+
+  function setQty(pid, v) {
+    const n = v === '' ? 0 : Number(v);
+    if (!isFinite(n) || n < 0) return;
+    if (n > 0) P.qty[pid] = n; else delete P.qty[pid];
+    P.dirty = true;
+    const row = document.querySelector(`[data-row="${CSS.escape(pid)}"]`); if (row) row.classList.toggle('has-qty', n > 0);
+    footer();
+  }
+  function paintQty() {
+    document.querySelectorAll('.qty').forEach(inp => {
+      const q = P.qty[inp.dataset.pid];
+      if (inp !== document.activeElement) inp.value = q ? fmtQty(q) : '';
+      inp.closest('.row').classList.toggle('has-qty', !!q);
+    });
+  }
+  function footer() {
+    const n = Object.keys(P.qty).length;
+    $('footCount').innerHTML = `<strong>${n}</strong> product${n === 1 ? '' : 's'} for <strong style="color:var(--accent)">${esc(nice(P.date))}</strong>`;
+    $('submitBtn').textContent = P.lastSubmitted ? 'Update order →' : 'Send order →';
+  }
+
+  async function changeDate(d) {
+    if (d === P.date) return;
+    if (P.dirty && Object.keys(P.qty).length && !confirm('You have not sent this order yet. Switch day and lose these quantities?')) return;
+    P.date = d;
+    document.querySelectorAll('.date-chip').forEach(b => b.classList.toggle('active', b.dataset.date === d));
+    await loadDate(d);
+  }
+
+  // Shows what is already booked for that day, so the customer edits it rather than starting again
+  async function loadDate(d) {
+    $('dateInfo').innerHTML = 'Checking for an existing order…';
+    P.qty = {}; P.dirty = false; P.lastSubmitted = ''; paintQty(); footer();
+    try {
+      const r = await API.call('portalGetOrder', { customer: P.cust, token: P.token, date: d });
+      if (d !== P.date) return;
+      P.qty = {}; Object.keys(r.lines || {}).forEach(pid => { if (r.lines[pid] > 0) P.qty[pid] = r.lines[pid]; });
+      P.lastSubmitted = r.lastSubmitted || '';
+      const n = Object.keys(P.qty).length;
+      $('dateInfo').innerHTML = n
+        ? `<span style="color:var(--success)">✓ MH Meats already has ${n} product${n === 1 ? '' : 's'} booked for ${esc(nice(d))}${P.lastSubmitted ? ' (last sent ' + esc(new Date(P.lastSubmitted).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })) + ')' : ''}.</span> Change the numbers below and press “Update order”.`
+        : `No order yet for ${esc(nice(d))}.`;
+    } catch (e) {
+      $('dateInfo').innerHTML = `<span style="color:var(--danger)">Could not check for an existing order (${esc(e.message)}). You can still send one.</span>`;
+    }
+    paintQty(); footer();
+  }
+
+  async function submit() {
+    if (P.sending) return;
+    const n = Object.keys(P.qty).length;
+    if (!n && !P.lastSubmitted) return toast('Enter at least one quantity', true);
+    if (!n && !confirm('Send an EMPTY order? This cancels your order for ' + nice(P.date) + '.')) return;
+    const key = 'mhnew_sub_' + P.cust + '_' + P.date + '_' + JSON.stringify(P.qty);
+    let sid = ssGet(key);                                   // retrying the same order reuses the same id → never doubled
+    if (!sid) { sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2); ssSet(key, sid); }
+    P.sending = true;
+    const btn = $('submitBtn'); btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      const r = await API.call('portalSubmit', { customer: P.cust, token: P.token, date: P.date, lines: P.qty, note: ($('orderNote') || {}).value || '', submissionId: sid }, { retries: 3, timeout: 30000 });
+      ssSet(key, null);
+      P.dirty = false;
+      showConfirm(r);
+    } catch (e) {
+      btn.disabled = false; footer();
+      const msg = e.server ? e.message : 'Your order was NOT sent — there is no connection. Check your signal and press the button again.';
+      $('dateInfo').innerHTML = `<span style="color:var(--danger);font-weight:600">✗ ${esc(msg)}</span>`;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      toast(msg, true);
+    } finally { P.sending = false; btn.disabled = false; }
+  }
+
+  function showConfirm(r) {
+    const byId = {}; P.products.forEach(p => { byId[p.id] = p; });
+    const rows = Object.entries(P.qty).map(([pid, q]) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>${esc(byId[pid] ? byId[pid].name : pid)}</span><span class="mono" style="color:var(--accent)">× ${fmtQty(q)}</span></div>`).join('');
+    $('main').innerHTML = `<div class="confirm"><div class="big">✅</div><h2 class="cond" style="font-size:26px;margin:8px 0">Order received by MH Meats</h2>
+      <div class="muted">${esc(P.customer.name)} — <strong style="color:var(--text)">${esc(nice(P.date))}</strong> — ${r.count} product${r.count === 1 ? '' : 's'}</div>
+      <div class="muted mono" style="font-size:10px;margin-top:4px">Reference ${esc(String(r.submissionId).slice(0, 8).toUpperCase())}</div></div>
+      <div class="card"><div class="card-body">${rows || '<div class="muted">Empty order — your order for this day is cancelled.</div>'}</div></div>
+      <div style="text-align:center"><button class="btn btn-primary" onclick="location.reload()">Place or change another order</button></div>`;
+    $('footer').classList.add('hidden');
+  }
+
+  // ── History & last order ─────────────────────────────────────────
+  async function loadHistory() {
+    try {
+      const r = await API.call('portalHistory', { customer: P.cust, token: P.token, days: 14 });
+      P.history = r.submissions || [];
+    } catch (e) { P.history = []; if ($('history')) $('history').textContent = 'Could not load history.'; return; }
+    $('lastBtn').classList.toggle('hidden', !P.history.some(h => Object.keys(h.lines).length));
+    const byId = {}; P.products.forEach(p => { byId[p.id] = p; });
+    if (!$('history')) return;
+    $('history').innerHTML = P.history.length ? P.history.map((h, i) => `<div class="hist"><div class="hist-h" data-h="${i}">
+        <strong class="cond" style="font-size:14px">${esc(nice(h.date))}</strong>
+        <span class="mono muted" style="font-size:10px">sent ${esc(new Date(h.timestamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>
+        <span class="muted" style="margin-left:auto;font-size:11px">${h.lineCount} items</span>
+        <button class="btn btn-ghost" data-reorder="${i}">🔄 Reorder</button></div>
+        <div class="hidden" data-hl="${i}" style="padding:6px 12px">${Object.entries(h.lines).map(([pid, q]) => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span>${esc(byId[pid] ? byId[pid].name : '(no longer available)')}</span><span class="mono" style="color:var(--accent)">× ${fmtQty(q)}</span></div>`).join('') || 'Empty order'}</div></div>`).join('')
+      : 'No orders in the last 14 days.';
+    document.querySelectorAll('[data-h]').forEach(el => { el.onclick = e => { if (e.target.dataset.reorder !== undefined) return; document.querySelector(`[data-hl="${el.dataset.h}"]`).classList.toggle('hidden'); }; });
+    document.querySelectorAll('[data-reorder]').forEach(b => { b.onclick = () => applyLines(P.history[+b.dataset.reorder].lines); });
+  }
+
+  function applyLines(lines) {
+    const valid = new Set(P.products.map(p => p.id));
+    const skipped = Object.keys(lines).filter(pid => !valid.has(pid)).length;
+    P.qty = {}; Object.entries(lines).forEach(([pid, q]) => { if (valid.has(pid) && q > 0) P.qty[pid] = q; });
+    P.dirty = true; paintQty(); footer();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    toast('Quantities filled in — check them and press Send' + (skipped ? ` (${skipped} item(s) no longer available)` : ''));
+  }
+  function loadLast() { const h = P.history.find(x => Object.keys(x.lines).length); if (h) applyLines(h.lines); }
+
+  // ── Voice: say “six chicken fillets” ─────────────────────────────
+  let rec = null, voiceOn = false;
+  const NUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50 };
+  function voiceMsg(m, ms) { const el = $('voiceStatus'); el.textContent = m; el.classList.remove('hidden'); if (ms) setTimeout(() => { if (voiceOn) el.textContent = '🎤 Listening…'; else el.classList.add('hidden'); }, ms); }
+  function toggleVoice() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return toast('Voice input needs Chrome', true);
+    if (voiceOn) { voiceOn = false; rec && rec.stop(); $('voiceBtn').textContent = '🎤'; $('voiceStatus').classList.add('hidden'); return; }
+    rec = new SR(); rec.continuous = true; rec.interimResults = false; rec.lang = 'en-GB';
+    rec.onresult = e => heard(e.results[e.results.length - 1][0].transcript.toLowerCase().trim());
+    rec.onerror = e => { if (e.error !== 'aborted') voiceMsg('Voice error: ' + e.error, 3000); };
+    rec.onend = () => { if (voiceOn) try { rec.start(); } catch (e) {} };
+    rec.start(); voiceOn = true; $('voiceBtn').textContent = '⏹ Stop'; voiceMsg('🎤 Listening…');
+  }
+  function score(spoken, name) {
+    const sw = spoken.split(/\s+/).filter(w => w.length > 2), pw = name.split(/\s+/).filter(w => w.length > 2);
+    if (!sw.length) return 0;
+    let m = 0; sw.forEach(s => { if (pw.some(p => p.indexOf(s) >= 0 || s.indexOf(p) >= 0)) m++; });
+    return m / Math.max(sw.length, pw.length);
+  }
+  function heard(text) {
+    let t = text; Object.keys(NUM).forEach(w => { t = t.replace(new RegExp('\\b' + w + '\\b', 'g'), NUM[w]); });
+    const m = t.match(/\b(\d+(\.\d+)?)\b/); if (!m) return voiceMsg('? No number heard: “' + text + '”', 3000);
+    const q = Number(m[1]); const said = t.replace(m[0], '').trim();
+    let best = null, bs = 0; P.products.forEach(p => { const s = score(said, p.name.toLowerCase()); if (s > bs) { bs = s; best = p; } });
+    if (!best || bs <= 0.35) return voiceMsg('? Not recognised: “' + said + '”', 3000);
+    setQty(best.id, String(q)); paintQty();
+    const row = document.querySelector(`[data-row="${CSS.escape(best.id)}"]`); if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    voiceMsg('✓ ' + best.name + ' = ' + q, 2500);
+  }
+
+  window.addEventListener('beforeunload', e => { if (P.dirty && Object.keys(P.qty).length) { e.preventDefault(); e.returnValue = 'Your order has not been sent.'; return e.returnValue; } });
+  window.P = { submit, loadLast, toggleVoice, _state: P };
+  init();
+})();
+</script>
+</body>
+</html>
